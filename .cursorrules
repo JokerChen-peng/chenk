@@ -1,0 +1,97 @@
+# 项目规则: 本地短时活动规划 Agent (灰雾)
+
+## 1) 目标与边界
+- MUST: 系统以"周末闲时活动规划"为核心场景, 生成可执行的吃喝玩乐时间轴并支持最终一键预订。
+- MUST: 规划必须满足真实世界约束: 时间、空间、预算、同行人群画像。
+- MUST NOT: 产生任何"瞬间移动"或不可达路线。
+- MUST: 将"空间与心理推理失败"视为一类高优先级风险并持续校验。
+
+## 2) 技术栈约束
+- MUST: 使用 Node.js + TypeScript(strict) + Next.js(App Router)。
+- MUST: 后端编排由 Mastra Agent Loop 驱动, 并在 maxSteps 内完成重试/自愈。
+- MUST: 前端采用 Assistant UI + Vercel AI SDK(v5/v6), 与后端 SSE 流式通信。
+- MUST: 关键输入输出通过 zod 做 schema 校验。
+- MUST NOT: 在领域模型或工具输入输出中使用 any。
+
+## 3) 冲突处理优先级
+当规则冲突时, 按以下顺序执行(从高到低):
+1. 安全/合规与资金风险控制
+2. 物理可行性(时空可达、排队约束、营业时段)
+3. 事务正确性(幂等、可回滚、可追踪)
+4. 用户偏好与体验优化
+5. 文案与展示风格
+
+## 4) 核心工具契约 (Mock APIs)
+以下工具是模型与现实世界的唯一边界, 不得绕过。
+
+### 4.1 search_enhanced_poi
+- MUST: 支持行政区划、人均消费、人群标签过滤。
+- MUST: 返回结构化数组, 且每个 POI 包含:
+  - `poi_id: string`
+  - `name: string`
+  - `category: "food" | "drink" | "play" | "relax"`
+  - `location: { lat: number; lng: number; district: string }`
+  - `avg_cost_per_person: number`
+  - `current_wait_time_minutes: number`
+  - `open_minutes: [number, number]`
+
+### 4.2 calculate_transit_matrix
+- MUST: 计算任意两点间通行时间与成本(模拟高德 API)。
+- MUST: 返回:
+  - `from_poi_id: string`
+  - `to_poi_id: string`
+  - `duration_minutes: number`
+  - `cost_cny: number`
+  - `mode: "walk" | "taxi" | "transit"`
+
+### 4.3 validate_timeline_feasibility
+- MUST: 校验时间重叠、排队超时、营业时段冲突、预算超限。
+- MUST: 返回:
+  - `feasible: boolean`
+  - `violations: Array<{ code: string; message: string; at_index?: number }>`
+  - `total_cost_cny: number`
+  - `total_duration_minutes: number`
+
+### 4.4 execute_transaction
+- MUST: 仅用于下单/预订等高敏事务。
+- MUST: 必须包含 `idempotency_key: string`。
+- MUST: 返回可追踪事务号 `transaction_id: string` 与最终状态。
+
+## 5) 错误处理与自愈机制
+- MUST NOT: 将工具失败升级为导致系统崩溃的全局异常。
+- MUST: 捕获异常并返回统一错误对象:
+  - `code: string` (如 `RESOURCE_EXHAUSTED`, `TIME_CONFLICT`, `BUDGET_EXCEEDED`)
+  - `message: string`
+  - `retryable: boolean`
+  - `source: "tool" | "planner" | "network"`
+  - `suggested_action: string`
+- MUST: 由 Mastra Agent Loop 读取错误并执行局部重规划(Re-planning)。
+
+## 6) Human-in-the-loop 事务拦截
+- MUST: 对 `execute_transaction` 进行前端确认拦截。
+- MUST: 使用 `addToolApprovalResponse` 或等价机制挂起执行, 等待用户授权。
+- MUST NOT: 未经用户确认直接提交订单、支付或不可逆操作。
+
+## 7) UI 状态与生成式渲染
+- SHOULD: 采用声明式状态映射, 避免手写复杂 reducer。
+- SHOULD: 将工具执行中状态映射为骨架屏/Loading 组件。
+- MUST NOT: 在前端暴露原始思维链; 仅展示用户可理解的摘要与进度。
+
+## 8) 运行时护栏 (NFR)
+- MUST: 定义并执行超时策略:
+  - 单工具超时建议 <= 8s
+  - 单轮规划总超时建议 <= 30s
+- MUST: 定义重试策略:
+  - 仅对 retryable 错误重试
+  - 指数退避
+  - 最大重试次数明确且可配置
+- MUST: 实现全链路可观测:
+  - 每次请求生成 `request_id`
+  - 工具调用携带并透传 `request_id`
+  - 事务调用透传 `idempotency_key`
+
+## 9) 代码生成硬规范
+- MUST: 所有新增代码为强类型 TypeScript。
+- MUST: 领域实体与工具 I/O 由 zod 统一定义。
+- MUST: 新增功能同时补充最小可验证测试(至少覆盖 1 个成功路径 + 1 个失败路径)。
+- SHOULD: 优先小步可回滚改动, 避免大段不可验证重构。
